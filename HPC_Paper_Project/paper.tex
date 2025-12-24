@@ -1,0 +1,297 @@
+\documentclass[12pt, a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{ctex} % 中文支持
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{booktabs} % 更好的表格线
+\usepackage{caption}
+\usepackage{subcaption}
+
+% 页面边距配置
+\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+% 代码高亮样式配置（优化中文兼容性）
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize, % 缩小字体避免代码溢出
+    breakatwhitespace=false,         
+    breaklines=true,                  % 自动换行
+    captionpos=b,                     % 标题在下方
+    keepspaces=true,                 
+    numbers=left,                     % 行号在左侧
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2,
+    frame=tb, % 增加上下边框，提升可读性
+    xleftmargin=10pt % 左侧内边距，避免行号紧贴边框
+}
+
+\lstset{style=mystyle} % 全局应用代码样式
+
+% 超链接配置（优化中文显示）
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue,
+    breaklinks=true
+}
+
+\title{\textbf{并行计算架构在静电场数值模拟中的应用与性能优化研究}}
+\author{计算机科学与技术系 \quad 刘沁昕}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+随着科学工程领域对仿真精度的要求日益提高，求解偏微分方程（PDE）的计算规模呈指数级增长，传统的串行数值算法已成为制约模拟效率的主要瓶颈。本文以静电场中的拉普拉斯方程求解为例，深入探讨了高性能计算（HPC）中的并行化策略。针对经典 Gauss-Seidel 迭代法中存在的数据依赖性问题，本文采用了红黑排序（Red-Black Ordering）算法进行解耦，并基于 Python 的 Numba 即时编译（JIT）技术实现了多核 CPU 并行加速。实验结果表明，在 $500 \times 500$ 网格规模下，优化后的并行算法在 10 核处理器上取得了 8.37 倍的加速比，验证了并行计算架构在解决大规模科学计算问题中的有效性与必要性。此外，本文还对异构计算与“AI for Science”等前沿计算范式进行了展望。
+
+\textbf{关键词：} 并行计算；数值模拟；拉普拉斯方程；红黑排序；Numba；AI for Science
+\end{abstract}
+
+\section{引言 (Introduction)}
+
+数值计算（Numerical Computing）作为连接理论科学与实验科学的第三种范式，在电磁学、流体力学、气象预报等领域发挥着不可替代的作用。然而，随着物理模型的精细化，离散化网格的规模急剧膨胀，导致计算量呈几何级数增加。受限于摩尔定律的放缓，单核处理器的性能提升已趋于停滞，利用多核及众核架构进行并行计算（Parallel Computing）成为突破算力瓶颈的必然选择。
+
+本文聚焦于静电场模拟这一经典问题，旨在探讨如何利用现代计算机体系结构特性，对传统的数值求解算法进行并行化改造。文章首先分析了有限差分法（FDM）求解拉普拉斯方程的数学模型及其串行实现的局限性；随后详细阐述了基于红黑排序的并行算法设计与 Numba 编译优化实现；最后通过基准测试分析了算法的加速性能与可扩展性，并对未来的计算范式进行了展望。
+
+\section{数学模型与数值方法 (Mathematical Model)}
+
+\subsection{控制方程与离散化}
+静电场中的电势分布 $V(x, y)$ 由拉普拉斯方程描述：
+\begin{equation}
+\nabla^2 V = \frac{\partial^2 V}{\partial x^2} + \frac{\partial^2 V}{\partial y^2} = 0
+\end{equation}
+为了在计算机上求解，我们将连续的求解区域离散化为 $N \times N$ 的均匀网格。根据泰勒展开，二阶导数可以使用中心差分格式近似，其截断误差为 $O(\Delta x^2)$。对于内部节点 $(i, j)$，离散化方程为：
+\begin{equation}
+\frac{V_{i+1,j} - 2V_{i,j} + V_{i-1,j}}{\Delta x^2} + \frac{V_{i,j+1} - 2V_{i,j} + V_{i,j-1}}{\Delta y^2} = 0
+\end{equation}
+设 $\Delta x = \Delta y$，则该方程简化为五点差分格式：
+\begin{equation}
+V_{i,j} = \frac{1}{4} (V_{i-1,j} + V_{i+1,j} + V_{i,j-1} + V_{i,j+1})
+\end{equation}
+这表明，任意一点的电势等于其周围四个邻居电势的平均值。
+
+\subsection{迭代求解算法}
+求解上述大型稀疏线性方程组 $Ax=b$ 通常采用迭代法。
+\begin{itemize}
+    \item \textbf{Jacobi 迭代}：计算 $V_{i,j}^{(k+1)}$ 时仅使用上一轮迭代的值 $V^{(k)}$。该方法天然并行，但收敛速度较慢。
+    \item \textbf{Gauss-Seidel 迭代}：计算时利用已更新的最新值。其收敛速度通常优于 Jacobi，但引入了数据依赖。
+    \item \textbf{逐次超松弛迭代 (SOR)}：在 Gauss-Seidel 基础上引入松弛因子 $\omega$（$1 < \omega < 2$）以加速收敛：
+    \begin{equation}
+    V_{i,j}^{(k+1)} = (1-\omega)V_{i,j}^{(k)} + \omega \cdot \frac{1}{4} \left( V_{i-1,j}^{(k+1)} + V_{i+1,j}^{(k+1)} + V_{i,j-1}^{(k+1)} + V_{i,j+1}^{(k+1)} \right)
+    \end{equation}
+\end{itemize}
+
+\section{并行算法设计与实现 (Algorithm Design)}
+
+\subsection{串行算法的瓶颈分析}
+观察标准 SOR 迭代公式可知，计算 $V_{i,j}^{(k+1)}$ 依赖于 $V_{i-1,j}^{(k+1)}$ 、 $V_{i,j-1}^{(k+1)}$ 、$V_{i+1,j}^{(k+1)}$和$V_{i,j+1}^{(k+1)}$。这种“写后读”（Read-After-Write, RAW）的数据依赖性构成了并行化的主要障碍。
+
+在最初的 Python 实现中，我们利用 NumPy 的向量化操作来避免慢速的 Python 循环。然而，NumPy 的实现虽然利用了 SIMD 指令，但本质上仍然受限于内存带宽（Memory Bound）。
+
+\begin{lstlisting}[language=Python, caption=基准实现：NumPy 向量化 (solver.py)]
+def _update_checkerboard(self, offset, omega):
+    # V 为类成员变量（电势网格），维度为 (ny, nx)
+    # checker_mask 为预定义的棋盘格掩码（与 V 同维度）
+    # ...（省略初始化代码）
+    # 1. 计算邻居和 (产生临时数组，大量内存读写)
+    neighbors = 0.25 * (V[1:-1, 0:-2] + V[1:-1, 2:] + V[0:-2, 1:-1] + V[2:, 1:-1])
+    
+    # 2. 计算更新值 (再次产生临时数组)
+    new_val = (1 - omega) * V[1:-1, 1:-1] + omega * neighbors
+    
+    # 3. 掩码操作 (Masking)：仅更新非边界的目标颜色网格点
+    # 需要计算 checker_mask 并进行布尔索引，开销巨大
+    active_mask = checker_mask & (~self.boundary_mask[1:-1, 1:-1])
+    V[1:-1, 1:-1][active_mask] = new_val[active_mask]
+\end{lstlisting}
+
+上述代码存在两个主要问题：
+1. 临时对象开销：neighbors 和 new\_val等中间结果需要分配与网格规模相当的内存（例如 $500 \times 500$ 网格需分配两个 $498 \times 498$ 的数组），导致 CPU 缓存（Cache）失效，频繁访问慢速的主存（RAM），成为内存带宽瓶颈；
+2. 缺乏线程级并行：NumPy 的基本操作通常只利用单核（除非链接了并行 BLAS 库，但对于这种逐元素算术操作，BLAS 优化效果有限），无法充分利用多核处理器的算力。
+
+\subsection{红黑排序策略 (Red-Black Ordering)}
+为了解耦数据依赖，本文引入红黑排序策略。将网格点按棋盘格模式分为两类：
+\begin{itemize}
+    \item \textbf{红点 (Red)}：索引和 $i+j$ 为偶数；
+    \item \textbf{黑点 (Black)}：索引和 $i+j$ 为奇数。
+\end{itemize}
+在五点差分格式中，红点的邻居完全由黑点组成，黑点的邻居完全由红点组成。这意味着，若固定所有黑点的值，所有红点的更新方程之间互不依赖（同理，固定红点可并行更新黑点）。
+
+基于此性质，我们将一次迭代分解为两个并行的子步骤：
+\begin{enumerate}
+    \item \textbf{更新红点}：利用上一轮的黑点值，并行计算所有红点的新值；
+    \item \textbf{同步 (Synchronization)}：确保所有红点更新完毕（无数据竞争）；
+    \item \textbf{更新黑点}：利用最新的红点值，并行计算所有黑点的新值。
+\end{enumerate}
+该策略将原本强耦合的 $O(N^2)$ 串行操作转化为两个 $O(N^2/2)$ 的并行操作，极大地提升了并行度。
+
+\subsection{基于 Numba 的高性能实现}
+为了克服 Python 的性能瓶颈，本文采用 **Numba** 库。Numba 是一个基于 LLVM 的即时编译器（JIT），能在运行时将 Python 函数编译为优化的机器码，并支持自动并行化。
+
+其核心优化机制包括：
+\begin{itemize}
+    \item \textbf{去解释器化}：通过 `@jit(nopython=True)` 装饰器，绕过 Python 解释器，直接生成机器指令，消除 Python 动态类型带来的解释开销；
+    \item \textbf{循环融合 (Loop Fusion)}：Numba 可将“计算邻居和→更新值→掩码判断”等多个操作融合在一个循环中，避免了 NumPy 那样的临时数组创建，极大提高了缓存局部性（Cache Locality）；
+    \item \textbf{自动多线程}：通过 `parallel=True` 和 `prange`（并行 range），编译器自动分析循环依赖（红黑排序已保证无依赖），并将任务调度到多个 CPU 核心上执行（底层基于 OpenMP）。
+\end{itemize}
+
+优化后的核心代码如下：
+
+\begin{lstlisting}[language=Python, caption=优化实现：Numba 并行加速 (solver_numba.py)]
+from numba import jit, prange
+
+@jit(nopython=True, parallel=True, fastmath=True)
+def update_red_black(V, boundary_mask, omega, is_black):
+    """
+    并行更新红/黑网格点（红黑排序）
+    参数：
+        V: 电势网格 (ny, nx)，原地更新
+        boundary_mask: 边界掩码 (ny, nx)，True 表示边界点（不更新）
+        omega: SOR 松弛因子
+        is_black: True 表示更新黑点（i+j 为奇），False 表示更新红点（i+j 为偶）
+    """
+    ny, nx = V.shape
+    # prange 指示编译器进行并行循环调度（OpenMP 风格多线程）
+    for i in prange(1, ny - 1):  # 行并行（无依赖）
+        for j in range(1, nx - 1):  # 列串行（单核心内缓存友好）
+            # 仅更新指定颜色的非边界点
+            if (i + j) % 2 == is_black and not boundary_mask[i, j]:
+                # 所有计算在寄存器中完成，无临时数组开销
+                v_neighbor_avg = 0.25 * (V[i-1, j] + V[i+1, j] + V[i, j-1] + V[i, j+1])
+                V[i, j] = V[i, j] + omega * (v_neighbor_avg - V[i, j])
+    return V
+\end{lstlisting}
+
+\section{实验结果与性能分析 (Experimental Results)}
+
+\subsection{实验环境}
+\begin{itemize}
+    \item \textbf{处理器}：Apple M4 芯片 10核（4性能和6能效）
+    \item \textbf{软件栈}：Python 3.9，NumPy 1.26，Numba 0.59
+    \item \textbf{基准算法}：基于 NumPy 向量化操作的串行 SOR 实现（红黑排序相同逻辑，仅无并行）
+    \item \textbf{收敛判据}：迭代 5000 次或相邻两次迭代的电势网格 $L_2$ 范数误差小于 $10^{-6}$（取先满足者）
+\end{itemize}
+
+\subsection{性能测试}
+我们在不同网格规模下对比了串行算法与并行算法的运行时间及加速比：
+
+\begin{table}[H]
+\centering
+\caption{串行与并行算法性能对比}
+\begin{tabular}{cccc}
+\toprule
+\textbf{网格规模 ($N \times N$)} & \textbf{串行耗时 (s)} & \textbf{并行耗时 (s)} & \textbf{加速比 (Speedup)} \\
+\midrule
+$200 \times 200$ & 0.62 & 0.22 & 2.79× \\
+$500 \times 500$ & 21.42 & 2.56 & \textbf{8.37×} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{结果验证与可视化 (Verification and Visualization)}
+为了验证并行算法的正确性，我们选取了“尖端放电”模型进行可视化对比。该模型包含一个接地平板和一个高压针尖，电场分布具有较强的非均匀性。
+
+图 \ref{fig:comparison} 展示了串行算法（NumPy）与并行算法（Numba）计算得到的电势分布与电场线。直观上，两者的结果完全一致。
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{res_paper/plot_serial.png}
+        \caption{串行算法结果 (Serial)}
+        \label{fig:serial}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{res_paper/plot_parallel.png}
+        \caption{并行算法结果 (Parallel)}
+        \label{fig:parallel}
+    \end{subfigure}
+    \caption{尖端放电模型的电势与电场分布对比}
+    \label{fig:comparison}
+\end{figure}
+
+进一步的数值分析表明，两者的最大绝对误差仅为 $3.30 \times 10^{-4}$ V（相对于 1000V 的电压源，相对误差约为 $3 \times 10^{-7}$），均方误差为 $1.16 \times 10^{-4}$。图 \ref{fig:diff} 展示了两者结果的差异热力图，可见差异主要集中在电势变化剧烈的针尖附近，这属于浮点数计算顺序不同带来的正常舍入误差（Rounding Error），证明了并行算法在保持高精度的同时实现了显著加速。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{res_paper/plot_difference.png}
+    \caption{串行与并行结果的差异热力图 (Difference Map)}
+    \label{fig:diff}
+\end{figure}
+
+\subsection{结果分析}
+\begin{enumerate}
+    \item \textbf{加速比分析}：在 $500 \times 500$ 的大规模网格下，并行算法实现了 8.37 倍的加速。考虑到测试平台为 10 核处理器（4 性能核 + 6 能效核），这一结果接近了线性加速比（Linear Speedup）。核心原因是并行化后，每个核心仅处理部分网格点，数据被分散到多个核心的私有缓存（L1/L2 Cache）中，减少了缓存冲突和主存访问次数，提高了整体缓存命中率，部分抵消了并行开销；
+    \item \textbf{规模效应}：在较小网格（$200 \times 200$）下，加速比仅为 2.79 倍。这符合并行计算的一般规律：当计算任务量较小时，线程创建、上下文切换以及核心间同步带来的开销（Overhead）在总时间中占比较大；随着问题规模增大，计算部分的时间占比显著增加，并行优势得以充分释放。
+\end{enumerate}
+
+\section{前沿高性能计算技术展望 (Frontier HPC Technologies)}
+
+本文主要探讨了基于多核 CPU 的同构并行计算。然而，高性能计算（HPC）领域正处于快速变革之中，多种新兴技术正在重塑科学计算的范式。
+
+\subsection{异构计算与 GPU 加速}
+图形处理器（GPU）最初用于图形渲染，但因其拥有数以千计的流处理核心和高带宽显存，现已成为科学计算的主力军。对于静电场模拟这类数据并行（Data Parallel）密集型任务，GPU 是比 CPU 更理想的计算平台。
+通过 CUDA 或 OpenCL 编程模型，可以将红黑迭代内核移植至 GPU。现代数据中心级 GPU（如 NVIDIA H100）能提供数十 TFLOPS 的双精度算力，预期可获得相比 CPU 百倍以上的性能提升。
+
+\subsection{分布式计算与区域分解}
+当模拟规模进一步扩大（例如 $10,000 \times 10,000$ 网格），单节点的内存容量将成为瓶颈。此时需采用分布式计算（Distributed Computing）。
+基于消息传递接口（MPI）的区域分解法（Domain Decomposition）是主流方案。将巨大的网格切割成多个子块分配给不同的计算节点（服务器），节点间通过高速互连网络（如 InfiniBand）交换边界数据（Halo Exchange）。这是“天河”、“Summit”等超级计算机运行大规模气候模拟和核聚变模拟的基础架构。
+
+\subsection{混合精度计算 (Mixed Precision)}
+传统科学计算主要依赖双精度浮点数（FP64）以确保数值稳定性。然而，随着 AI 硬件的发展，半精度（FP16）和 Bfloat16 的算力大幅提升。
+混合精度计算技术尝试在计算的关键路径使用低精度以换取速度和内存带宽，而在累加等敏感操作使用高精度。在电磁场模拟中，合理利用混合精度可以在几乎不损失物理精度的前提下，显著提升计算吞吐量。
+
+\subsection{AI for Science：物理信息神经网络 (PINNs)}
+传统的数值方法（如 FDM, FEM）受限于网格划分，面临“维数灾难”问题。近年来兴起的“AI for Science”范式提出了一种全新的思路：利用深度神经网络（DNN）作为偏微分方程解的近似函数。
+物理信息神经网络（PINNs）将物理方程（如 $\nabla^2 V = 0$）的残差直接加入损失函数中进行训练。这种方法无需网格（Mesh-free），能够直接从数据中学习物理规律，特别适用于高维、非线性以及反问题的求解。
+
+\subsection{量子计算 (Quantum Computing)}
+作为后摩尔时代的颠覆性技术，量子计算在求解线性方程组方面具有巨大的理论优势。HHL 算法（Harrow-Hassidim-Lloyd）在理论上能够以对数复杂度 $O(\log N)$ 求解 $Ax=b$，相比经典算法的多项式复杂度具有指数级加速潜力。尽管目前仍处于含噪声中尺度量子（NISQ）阶段，但其在未来科学计算中的潜力不可估量。
+
+\section{结语 (Conclusion)}
+
+本文通过对静电场模拟程序的并行化改造，系统研究了并行计算在科学问题求解中的应用。实验表明，通过合理的算法设计（红黑排序）与底层编译优化（Numba），可以显著突破串行计算的性能瓶颈，实现近乎线性的加速效果。这一实践不仅验证了并行计算理论的有效性，也展示了计算机科学在推动基础科学研究中的核心驱动力。
+
+\begin{thebibliography}{99}
+
+\bibitem{amdahl1967}
+Amdahl, G. M. (1967). Validity of the single processor approach to achieving large scale computing capabilities. \textit{Proceedings of the April 18-20, 1967, spring joint computer conference}, 483-485.
+
+\bibitem{saad2003}
+Saad, Y. (2003). \textit{Iterative methods for sparse linear systems}. Society for Industrial and Applied Mathematics.
+
+\bibitem{numba2015}
+Lam, S. K., Pitrou, A., \& Seibert, S. (2015). Numba: A LLVM-based Python JIT compiler. \textit{Proceedings of the Second Workshop on the LLVM Compiler Infrastructure in HPC}, 1-6.
+
+\bibitem{raissi2019}
+Raissi, M., Perdikaris, P., \& Karniadakis, G. E. (2019). Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations. \textit{Journal of Computational Physics}, 378, 686-707.
+
+\bibitem{hhl2009}
+Harrow, A. W., Hassidim, A., \& Lloyd, S. (2009). Quantum algorithm for linear systems of equations. \textit{Physical review letters}, 103(15), 150502.
+
+\end{thebibliography}
+
+\end{document}
