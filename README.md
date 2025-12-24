@@ -1,5 +1,5 @@
 # 静电场数值模拟 (Electrostatic Field Simulation)
-
+完成于2025.12.24
 ## 项目简介
 本项目是一个基于 Python 的静电场数值模拟工具，专为计算机科学与物理学交叉学习设计。它利用**有限差分法 (Finite Difference Method, FDM)** 求解二维空间中的拉普拉斯方程 ($\nabla^2 V = 0$)，从而模拟不同电极形状下的电势分布和电场分布。
 
